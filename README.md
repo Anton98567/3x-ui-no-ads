@@ -55,25 +55,40 @@ location = /my-3x-panel/sponsors {
 
 ## 3. Установка / использование
 
-Скопируйте `3x-ui-no-ads.sh` на сервер с панелью и запускайте от `root`.
-В качестве URL укажите адрес панели так, как открываете её в браузере (вместе с base-path).
+### Одна команда (рекомендуется)
+
+Скрипт сам находит панель и base-path — просто выполните на сервере с 3X-UI:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Anton98567/3x-ui-no-ads/main/3x-ui-no-ads.sh | sudo bash
+```
+
+Если авто-определение не сработало (редко) — укажите адрес панели явно:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Anton98567/3x-ui-no-ads/main/3x-ui-no-ads.sh | sudo bash -s -- --url https://your-host/my-3x-panel/
+```
+
+После выполнения откройте панель и нажмите **Ctrl+F5**, чтобы браузер выббросил
+закэшированную карточку.
+
+### Пошагово (локальный файл)
+
+Скопируйте `3x-ui-no-ads.sh` на сервер и запускайте от `root`:
 
 ```bash
 # 1) снять рекламу
-sudo ./3x-ui-no-ads.sh apply  --url https://your-host/my-3x-panel/
+sudo ./3x-ui-no-ads.sh apply
 
 # 2) проверить, что реклама отключена и клиенты целы
-sudo ./3x-ui-no-ads.sh verify --url https://your-host/my-3x-panel/
+sudo ./3x-ui-no-ads.sh verify
 
 # 3) (по желанию) показать текущее состояние
-sudo ./3x-ui-no-ads.sh status --url https://your-host/my-3x-panel/
+sudo ./3x-ui-no-ads.sh status
 
 # 4) полностью откатить патч (реклама вернётся)
 sudo ./3x-ui-no-ads.sh remove
 ```
-
-После `apply` откройте панель и нажмите **Ctrl+F5** (жёсткая перезагрузка), чтобы браузер
-выбросил закэшированную карточку.
 
 ### Параметры
 

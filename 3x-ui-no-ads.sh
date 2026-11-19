@@ -71,13 +71,14 @@ BASE_PATH=""
 NGX_CONF=""
 DRY_RUN=0
 ASSUME_YES=0
+BASE_GIVEN=0
 
 # ---- arg parse --------------------------------------------------------------
 while [ $# -gt 0 ]; do
   case "$1" in
     apply|verify|remove|status) CMD="$1"; shift ;;
-    --url)       PANEL_URL="${2:-}"; shift 2 ;;
-    --base-path) BASE_PATH="${2:-}"; shift 2 ;;
+    --url)       PANEL_URL="${2:-}"; BASE_GIVEN=1; shift 2 ;;
+    --base-path) BASE_PATH="${2:-}"; BASE_GIVEN=1; shift 2 ;;
     --conf)      NGX_CONF="${2:-}";  shift 2 ;;
     --dry-run)   DRY_RUN=1; shift ;;
     -y|--yes)    ASSUME_YES=1; shift ;;
@@ -92,7 +93,7 @@ if [ -z "$BASE_PATH" ] && [ -n "$PANEL_URL" ]; then
   BASE_PATH=$(printf '%s' "$PANEL_URL" | sed -E 's#^[a-zA-Z]+://[^/]+##')
 fi
 
-# normalise base path: leading slash, no trailing slash ("" means root)
+# normalise base path: leading slash, no trailing slash ("" means root / unknown)
 if [ -n "$BASE_PATH" ]; then
   case "$BASE_PATH" in
     /*) ;;
@@ -101,12 +102,8 @@ if [ -n "$BASE_PATH" ]; then
   BASE_PATH="${BASE_PATH%/}"
 fi
 
-# the API endpoint we intercept: <base>/sponsors  (root -> /sponsors)
-if [ -n "$BASE_PATH" ]; then
-  ENDPOINT="${BASE_PATH}/sponsors"
-else
-  ENDPOINT="/sponsors"
-fi
+# NOTE: ENDPOINT (<base>/sponsors) is computed in finalize_target() below, after
+# the panel base path has been auto-detected when not supplied explicitly.
 
 # ---- helpers ----------------------------------------------------------------
 
@@ -129,7 +126,7 @@ detect_conf() {
           hit="$f"; break 2
         fi
       fi
-    done < <(find "$d" -maxdepth 2 -type f -name '*.conf' 2>/dev/null)
+    done < <(find "$d" -maxdepth 2 -type f -name '*.conf' 2>/dev/null | sort)
   done
   # fallback: any conf with a proxy_pass (again skipping backups)
   if [ -z "$hit" ]; then
@@ -137,6 +134,62 @@ detect_conf() {
   fi
   [ -n "$hit" ] || die "Could not locate the nginx config with the panel proxy. Use --conf <file>."
   printf '%s\n' "$hit"
+}
+
+# Auto-detect the panel base path (e.g. /my-3x-panel) by probing the nginx
+# backends at their proxied location paths and reading X_UI_BASE_PATH from the
+# panel HTML. Uses the full merged nginx config (nginx -T) so it is independent
+# of which single file holds the site block. Prints the normalised base path
+# (no trailing slash; empty string means the root base "/") and returns 0 on
+# success, 1 when nothing was found.
+detect_base_path() {
+  local full
+  full=$(nginx -T 2>/dev/null) || full=""
+  [ -n "$full" ] || full=$(cat /etc/nginx/conf.d/*.conf /etc/nginx/sites-enabled/* 2>/dev/null)
+  # candidate backends: "server host:port" inside upstream blocks + inline proxy_pass
+  local addrs
+  addrs=$(printf '%s\n' "$full" | grep -oE "server[[:space:]]+[0-9A-Za-z_.:-]+:[0-9]+" | awk '{print $2}')
+  addrs="$addrs $(printf '%s\n' "$full" | grep -oE "proxy_pass[[:space:]]+https?://[0-9A-Za-z_.:-]+:[0-9]+" | sed -E 's#.*://##')"
+  addrs=$(printf '%s\n' $addrs | sort -u)
+  # candidate paths: ^~ location prefixes that end in /
+  local paths
+  paths=$(printf '%s\n' "$full" | grep -oE "location[[:space:]]+\^~[[:space:]]+/[^ {]*" | awk '{print $3}' | sort -u)
+  local addr path base
+  for addr in $addrs; do
+    for path in $paths; do
+      base=$(curl -s -m 3 "http://${addr}${path}" 2>/dev/null | grep -oE 'X_UI_BASE_PATH="[^"]*"' | head -1 | sed -E 's/.*="([^"]*)"/\1/')
+      if [ -n "$base" ]; then
+        printf '%s\n' "${base%/}"; return 0
+      fi
+    done
+  done
+  return 1
+}
+
+# Finalise the interception target: resolve ENDPOINT from BASE_PATH, auto-detecting
+# the base path from nginx when it was not supplied via --url / --base-path.
+# Sets BASE_DETECTED=1 when a panel was actually located (even for a root base).
+finalize_target() {
+  BASE_DETECTED=0
+  if [ "$CMD" = "remove" ]; then
+    [ -n "$BASE_PATH" ] && ENDPOINT="${BASE_PATH}/sponsors" || ENDPOINT="/sponsors"
+    return 0
+  fi
+  if [ -z "$BASE_PATH" ] && [ "$BASE_GIVEN" = 0 ]; then
+    local detected
+    if detected=$(detect_base_path); then
+      BASE_PATH="$detected"
+      BASE_DETECTED=1
+      info "Auto-detected panel base path: ${BASE_PATH:-<root>}"
+    fi
+  else
+    BASE_DETECTED=1
+  fi
+  if [ -n "$BASE_PATH" ]; then
+    ENDPOINT="${BASE_PATH}/sponsors"
+  else
+    ENDPOINT="/sponsors"
+  fi
 }
 
 # Line number of the panel location directive to insert before.
@@ -213,6 +266,12 @@ reload_nginx() {
 #  COMMAND: apply
 # ============================================================================
 cmd_apply() {
+  finalize_target
+  # Guard: without --url/--base-path we must have located the panel, otherwise we
+  # cannot know the correct /sponsors endpoint to intercept.
+  if [ "$BASE_DETECTED" = 0 ]; then
+    die "Could not auto-detect the panel base path. Pass --url https://host/base/ or --base-path /base."
+  fi
   local conf
   conf=$(detect_conf)
   info "nginx config : $conf"
@@ -252,6 +311,7 @@ cmd_apply() {
 #  COMMAND: verify
 # ============================================================================
 cmd_verify() {
+  finalize_target
   local conf
   conf=$(detect_conf)
   local failed=0
@@ -343,6 +403,7 @@ cmd_remove() {
 #  COMMAND: status
 # ============================================================================
 cmd_status() {
+  finalize_target 2>/dev/null || true
   local conf
   conf=$(detect_conf 2>/dev/null || echo "")
   echo "Command     : $CMD"
