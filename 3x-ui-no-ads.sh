@@ -151,13 +151,24 @@ detect_base_path() {
   addrs=$(printf '%s\n' "$full" | grep -oE "server[[:space:]]+[0-9A-Za-z_.:-]+:[0-9]+" | awk '{print $2}')
   addrs="$addrs $(printf '%s\n' "$full" | grep -oE "proxy_pass[[:space:]]+https?://[0-9A-Za-z_.:-]+:[0-9]+" | sed -E 's#.*://##')"
   addrs=$(printf '%s\n' $addrs | sort -u)
+  # candidate unix-socket backends (server unix:/path;  or  proxy_pass http://unix:/path)
+  local socks
+  socks=$(printf '%s\n' "$full" | grep -oE "unix:[A-Za-z0-9/._-]+" | sed 's#^unix:##' | sort -u)
   # candidate paths: ^~ location prefixes that end in /
   local paths
   paths=$(printf '%s\n' "$full" | grep -oE "location[[:space:]]+\^~[[:space:]]+/[^ {]*" | awk '{print $3}' | sort -u)
-  local addr path base
+  local addr path sock base
   for addr in $addrs; do
     for path in $paths; do
       base=$(curl -s -m 3 "http://${addr}${path}" 2>/dev/null | grep -oE 'X_UI_BASE_PATH="[^"]*"' | head -1 | sed -E 's/.*="([^"]*)"/\1/')
+      if [ -n "$base" ]; then
+        printf '%s\n' "${base%/}"; return 0
+      fi
+    done
+  done
+  for sock in $socks; do
+    for path in $paths; do
+      base=$(curl -s -m 3 --unix-socket "$sock" "http://localhost${path}" 2>/dev/null | grep -oE 'X_UI_BASE_PATH="[^"]*"' | head -1 | sed -E 's/.*="([^"]*)"/\1/')
       if [ -n "$base" ]; then
         printf '%s\n' "${base%/}"; return 0
       fi
@@ -255,7 +266,14 @@ reload_nginx() {
     $NGX_TEST || true
     die "nginx config test FAILED. No reload performed."
   fi
-  $NGX_RELOAD
+  # reload without assuming systemd: systemctl -> service -> nginx -s reload
+  if command -v systemctl >/dev/null 2>&1 && systemctl reload nginx >/dev/null 2>&1; then
+    :
+  elif command -v service >/dev/null 2>&1 && service nginx reload >/dev/null 2>&1; then
+    :
+  else
+    nginx -s reload
+  fi
   # graceful reload: give the master a moment to swap workers, otherwise an
   # immediate request can still be served by an old worker with the old config.
   sleep 1
